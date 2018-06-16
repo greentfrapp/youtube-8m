@@ -27,6 +27,7 @@ from tensorflow import app
 from tensorflow import flags
 from tensorflow import gfile
 from tensorflow import logging
+from tensorflow.python.lib.io import file_io
 
 import eval_util
 import losses
@@ -132,7 +133,8 @@ def inference(reader, train_dir, data_pattern, out_file_location, batch_size, to
 
     if FLAGS.output_model_tgz:
       with tarfile.open(FLAGS.output_model_tgz, "w:gz") as tar:
-        for model_file in glob.glob(checkpoint_file + '.*'):
+        # for model_file in glob.glob(checkpoint_file + '.*'):
+        for model_file in file_io.get_matching_files(checkpoint_file + '.*'):
           tar.add(model_file, arcname=os.path.basename(model_file))
         tar.add(os.path.join(FLAGS.train_dir, "model_flags.json"),
                 arcname="model_flags.json")
@@ -200,8 +202,10 @@ def main(unused_argv):
 
   flags_dict_file = os.path.join(FLAGS.train_dir, "model_flags.json")
   if not os.path.exists(flags_dict_file):
+  if not file_io.file_exists(flags_dict_file):
     raise IOError("Cannot find %s. Did you run eval.py?" % flags_dict_file)
-  flags_dict = json.loads(open(flags_dict_file).read())
+  # flags_dict = json.loads(open(flags_dict_file).read())
+  flags_dict = json.loads(file_io.FileIO(model_flags_path, mode='r').read())
 
   # convert feature_names and feature_sizes to lists of values
   feature_names, feature_sizes = utils.GetListOfFeatureNamesAndSizes(

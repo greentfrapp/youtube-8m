@@ -28,6 +28,7 @@ from tensorflow import app
 from tensorflow import flags
 from tensorflow import gfile
 from tensorflow import logging
+from tensorflow.python.lib.io import file_io
 import utils
 
 FLAGS = flags.FLAGS
@@ -51,7 +52,6 @@ if __name__ == "__main__":
                        "How many threads to use for reading input files.")
   flags.DEFINE_boolean("run_once", False, "Whether to run eval only once.")
   flags.DEFINE_integer("top_k", 20, "How many predictions to output per video.")
-
 
 def find_class_by_name(name, modules):
   """Searches the provided modules for the named class and returns it."""
@@ -155,7 +155,8 @@ def build_graph(reader,
 
 
 def get_latest_checkpoint():
-  index_files = glob.glob(os.path.join(FLAGS.train_dir, 'model.ckpt-*.index'))
+  # index_files = glob.glob(os.path.join(FLAGS.train_dir, 'model.ckpt-*.index'))
+  index_files = file_io.get_matching_files(os.path.join(FLAGS.train_dir, 'model.ckpt-*.index'))
 
   # No files
   if not index_files:
@@ -281,10 +282,12 @@ def evaluate():
 
   # Write json of flags
   model_flags_path = os.path.join(FLAGS.train_dir, "model_flags.json")
-  if not os.path.exists(model_flags_path):
+  # if not os.path.exists(model_flags_path):
+  if not file_io.file_exists(model_flags_path):
     raise IOError(("Cannot find file %s. Did you run train.py on the same "
                    "--train_dir?") % model_flags_path)
-  flags_dict = json.loads(open(model_flags_path).read())
+  # flags_dict = json.loads(open(model_flags_path).read())
+  flags_dict = json.loads(file_io.FileIO(model_flags_path, mode='r').read())
 
   with tf.Graph().as_default():
     # convert feature_names and feature_sizes to lists of values
