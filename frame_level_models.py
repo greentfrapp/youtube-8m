@@ -15,6 +15,7 @@
 """Contains a collection of models which operate on variable-length sequences.
 """
 import math
+import numpy as np
 
 import models
 import video_level_models
@@ -40,12 +41,168 @@ flags.DEFINE_integer("dbof_hidden_size", 1024,
 flags.DEFINE_string("dbof_pooling_method", "max",
                     "The pooling method used in the DBoF cluster layer. "
                     "Choices are 'average' and 'max'.")
-flags.DEFINE_string("video_level_classifier_model", "MoeModel",
+flags.DEFINE_string("video_level_classifier_model", "GatedMoeModel",
                     "Some Frame-Level models can be decomposed into a "
                     "generalized pooling operation followed by a "
                     "classifier layer")
 flags.DEFINE_integer("lstm_cells", 1024, "Number of LSTM cells.")
 flags.DEFINE_integer("lstm_layers", 2, "Number of LSTM layers.")
+
+flags.DEFINE_integer("heads", 8, "Number of heads for AttentionModel")
+flags.DEFINE_integer("hidden", 1024, "Hidden units for AttentionModel")
+flags.DEFINE_integer("n_enc_layers", 2, "Number of encoder layers for AttentionModel")
+flags.DEFINE_integer("n_dec_layers", 2, "Number of decoder layers for AttentionModel")
+
+class AttentionModel(models.BaseModel):
+  """Creates an Attention-based model.
+
+  Args:
+    model_input: A 'batch_size' x 'max_frames' x 'num_features' matrix of
+                 input features.
+    vocab_size: The number of classes in the dataset.
+    num_frames: A vector of length 'batch' which indicates the number of
+         frames for each video (before padding).
+
+  Returns:
+    A dictionary with a tensor containing the probability predictions of the
+    model in the 'predictions' key. The dimensions of the tensor are
+    'batch_size' x 'num_classes'.
+  """
+    
+  def create_model(self,
+                   model_input,
+                   vocab_size,
+                   num_frames,
+                   iterations=None,
+                   add_batch_norm=None,
+                   sample_random_frames=None,
+                   is_training=True,
+                   hidden=None,
+                   n_enc_layers=None,
+                   n_dec_layers=None,
+                   heads=None,
+                   **unused_params):
+
+    iterations = iterations or FLAGS.iterations
+    # add_batch_norm = add_batch_norm or FLAGS.add_batch_norm
+    random_frames = sample_random_frames or FLAGS.sample_random_frames
+
+    heads = heads or FLAGS.heads
+    self.hidden = hidden or FLAGS.hidden
+    n_enc_layers = n_enc_layers or FLAGS.n_enc_layers
+    n_dec_layers = n_dec_layers or FLAGS.n_dec_layers
+
+    num_frames = tf.cast(tf.expand_dims(num_frames, 1), tf.float32)
+    if random_frames:
+      model_input = utils.SampleRandomFrames(model_input, num_frames, iterations)
+    else:
+      model_input = utils.SampleRandomSequence(model_input, num_frames, iterations)
+
+    batch_size = model_input.get_shape().as_list()[0]
+    max_frames = model_input.get_shape().as_list()[1]
+    feature_size = model_input.get_shape().as_list()[2]
+    # reshaped_input = tf.reshape(model_input, [-1, feature_size])
+
+    encoding = tf.layers.dense(
+      inputs=model_input,
+      units=self.hidden,
+      # dtype=tf.float32,
+      name="input_embedding"
+    )
+
+    for i in np.arange(n_enc_layers):
+      encoding = self.attention("enc_self_{}".format(i), encoding, h=heads)
+      dense = tf.layers.dense(
+        inputs=encoding,
+        units=self.hidden * 2,
+        activation=tf.nn.relu,
+        name="enc_dense_{}_1".format(i),
+      )
+      encoding += tf.layers.dense(
+        inputs=dense,
+        units=self.hidden,
+        activation=None,
+        name="enc_dense_{}_2".format(i),
+      )
+
+    decoder_query = tf.get_variable(
+      name="decoder_query",
+      shape=(1, 1, self.hidden),
+      dtype=tf.float32,
+      initializer=tf.random_normal_initializer(stddev=1e-2),
+    )
+    decoding = self.attention("dec_enc_0", tf.tile(decoder_query, multiples=tf.concat(([tf.shape(model_input)[0]], [1], [1]), axis=0)), encoding, h=heads)
+    for i in np.arange(n_dec_layers - 1):
+      # decoding = self.attention("dec_self_{}".format(i + 1), decoding, h=heads)
+      decoding = self.attention("dec_enc_{}".format(i + 1), decoding, encoding, h=heads)
+      dense = tf.layers.dense(
+        inputs=decoding,
+        units=self.hidden * 2,
+        activation=tf.nn.relu,
+        name="dec_dense_{}_1".format(i + 1),
+      )
+      decoding += tf.layers.dense(
+        inputs=dense,
+        units=self.hidden,
+        activation=None,
+        name="dec_dense_{}_2".format(i + 1),
+      )
+
+    activation = tf.reshape(decoding, [-1, self.hidden])
+
+    aggregated_model = getattr(video_level_models, FLAGS.video_level_classifier_model)
+
+    return aggregated_model().create_model(
+        model_input=activation,
+        vocab_size=vocab_size,
+        is_training=is_training,
+        **unused_params)
+
+  def attention(self, sfx, query, key=None, value=None, h=8):
+    if key is None and value is None:
+      key = value = query
+    elif value is None:
+      value = key
+    
+    W_query = tf.get_variable(
+      name="W_query_{}".format(sfx),
+      shape=(self.hidden, self.hidden),
+      dtype=tf.float32,
+      initializer=tf.random_normal_initializer(stddev=1e-2),
+    )
+    W_key = tf.get_variable(
+      name="W_key_{}".format(sfx),
+      shape=(self.hidden, self.hidden),
+      dtype=tf.float32,
+      initializer=tf.random_normal_initializer(stddev=1e-2),
+    )
+    W_value = tf.get_variable(
+      name="W_value_{}".format(sfx),
+      shape=(self.hidden, self.hidden),
+      dtype=tf.float32,
+      initializer=tf.random_normal_initializer(stddev=1e-2),
+    )
+    W_output = tf.get_variable(
+      name="W_output_{}".format(sfx),
+      shape=(self.hidden, self.hidden),
+      dtype=tf.float32,
+      initializer=tf.random_normal_initializer(stddev=1e-2),
+    )
+
+    multiquery = tf.reshape(tf.matmul(tf.reshape(query, [-1, self.hidden]), W_query), [-1, h, tf.shape(query)[1], int(self.hidden/h)])
+    multikey = tf.reshape(tf.matmul(tf.reshape(key, [-1, self.hidden]), W_key), [-1, h, tf.shape(key)[1], int(self.hidden/h)])
+    multivalue = tf.reshape(tf.matmul(tf.reshape(value, [-1, self.hidden]), W_value), [-1, h, tf.shape(value)[1], int(self.hidden/h)])
+
+    dotp = tf.matmul(multiquery, multikey, transpose_b=True) / (tf.cast(tf.shape(multiquery)[-1], tf.float32) ** 0.5)
+    attention_weights = tf.nn.softmax(dotp)
+    weighted_sum = tf.matmul(attention_weights, multivalue)
+    weighted_sum = tf.concat(tf.unstack(weighted_sum, axis=1), axis=-1)
+
+    multihead = tf.reshape(tf.matmul(tf.reshape(weighted_sum, [-1, self.hidden]), W_output), [-1, tf.shape(query)[1], self.hidden])
+    output = multihead + query
+    output = tf.contrib.layers.layer_norm(output, begin_norm_axis=2)
+
+    return output
 
 class FrameLevelLogisticModel(models.BaseModel):
 
